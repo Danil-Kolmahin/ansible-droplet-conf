@@ -1,0 +1,157 @@
+- name: Configure DigitalOcean droplet
+  hosts: nodes
+  become: yes
+  tasks:
+  - name: OS
+    block:
+      - apt:
+          update_cache: yes
+          upgrade: dist
+          autoclean: yes
+          autoremove: yes
+      - user:
+          name: '{{ sudo_user }}'
+          groups: sudo
+          append: yes
+  - name: SSH
+    block:
+      - lineinfile:
+          dest: /etc/ssh/sshd_config
+          regexp: "^#PasswordAuthentication yes"
+          line: "PasswordAuthentication no"
+        register: sshd_config
+      - lineinfile:
+          dest: /etc/sudoers
+          regexp: "^%wheel"
+          line: "{{ sudo_user }} ALL=(ALL) NOPASSWD: ALL"
+          validate: "/usr/sbin/visudo -cf %s"
+      - service:
+          name: sshd
+          state: restarted
+        when: sshd_config.changed
+  - name: Docker
+    block:
+      - get_url:
+          url: https://download.docker.com/linux/ubuntu/dists/jammy/pool/stable/amd64/{{ item }}
+          dest: /tmp/{{ item }}
+        loop: '{{ docker.packages }}'
+      - apt:
+          deb: /tmp/{{ item }}
+        loop: '{{ docker.packages }}'
+      - service:
+          name: docker
+          state: started
+      - user:
+          name: '{{ sudo_user }}'
+          groups: docker
+          append: yes
+  - name: Git
+    block:
+      - copy:
+          src: '{{ item }}'
+          dest: ~/.ssh/{{ item }}
+          mode: 0600
+        loop:
+          - id_rsa
+          - id_rsa.pub
+      - file:
+          path: /home/{{ sudo_user }}/.ssh
+          state: directory
+          mode: 0700
+        become_user: '{{ sudo_user }}'
+      - copy:
+          remote_src: yes
+          src: /root/.ssh/{{ item }}
+          dest: /home/{{ sudo_user }}/.ssh/{{ item }}
+          owner: '{{ sudo_user }}'
+          group: '{{ sudo_user }}'
+          mode: 0600
+        loop:
+          - id_rsa
+          - id_rsa.pub
+          - authorized_keys
+      - lineinfile:
+          dest: ~/.ssh/known_hosts
+          create: yes
+          state: present
+          line: "{{ lookup('pipe', 'ssh-keyscan -t rsa github.com') }}"
+          regexp: "^github\\.com"
+        become_user: '{{ sudo_user }}'
+      - git:
+          repo: git@github.com:Danil-Kolmahin/{{ git.repository_name }}.git
+          dest: /home/{{ sudo_user }}/{{ git.repository_name }}
+        become_user: '{{ sudo_user }}'
+      - git_config:
+          name: user.email
+          repo: ~/{{ git.repository_name }}
+          scope: local
+          value: danil.kolmahin@gmail.com
+        become_user: '{{ sudo_user }}'
+      - git_config:
+          name: user.name
+          repo: ~/{{ git.repository_name }}
+          scope: local
+          value: Danil-Kolmahin
+        become_user: '{{ sudo_user }}'
+  - name: NodeJS
+    block:
+      - file:
+          path: /usr/local/lib/nodejs
+          state: directory
+      - get_url:
+          url: https://nodejs.org/dist/v{{ nodejs.version }}/node-v{{ nodejs.version }}-linux-x64.tar.xz
+          dest: /tmp/node-v{{ nodejs.version }}-linux-x64.tar.xz
+      - unarchive:
+          src: /tmp/node-v{{ nodejs.version }}-linux-x64.tar.xz
+          dest: /usr/local/lib/nodejs
+          remote_src: yes
+      - lineinfile:
+          path: ~/.bashrc
+          line: export PATH=/usr/local/lib/nodejs/node-v{{ nodejs.version }}-linux-x64/bin:$PATH
+      - lineinfile:
+          path: ~/.bashrc
+          line: export PATH=/usr/local/lib/nodejs/node-v{{ nodejs.version }}-linux-x64/bin:$PATH
+        become_user: '{{ sudo_user }}'
+  - name: k3s
+    block:
+      - shell: curl -sfL https://get.k3s.io | sh -
+        args:
+          creates: /usr/local/bin/k3s
+      - file:
+          path: ~/.kube
+          state: directory
+        become_user: '{{ sudo_user }}'
+      - copy:
+          remote_src: yes
+          src: /etc/rancher/k3s/k3s.yaml
+          dest: /home/{{ sudo_user }}/.kube/config
+          owner: '{{ sudo_user }}'
+          group: '{{ sudo_user }}'
+          mode: 0644
+      - lineinfile:
+          path: ~/.bashrc
+          line: export KUBECONFIG=~/.kube/config
+        become_user: '{{ sudo_user }}'
+  - name: Helm
+    block:
+      - get_url:
+          url: https://get.helm.sh/helm-v{{ helm.version }}-linux-amd64.tar.gz
+          dest: /tmp/helm-v{{ helm.version }}-linux-amd64.tar.gz
+      - unarchive:
+          src: /tmp/helm-v{{ helm.version }}-linux-amd64.tar.gz
+          dest: /tmp
+          creates: /tmp/linux-amd64
+          remote_src: yes
+      - command:
+          cmd: mv /tmp/linux-amd64/helm /usr/local/bin/helm
+          removes: /tmp/linux-amd64/helm
+          creates: /usr/local/bin/helm
+  - name: Ansible
+    block:    
+    - apt_repository:
+        repo: ppa:ansible/ansible
+    - apt:
+        name: '{{ item }}'
+      loop:
+        - software-properties-common
+        - ansible
